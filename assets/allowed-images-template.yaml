@@ -1,0 +1,65 @@
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sallowedreposv2
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sAllowedReposv2
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            allowedImages:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sallowedreposv2
+
+        pod_spec = spec {
+          input.review.kind.kind == "Pod"
+          spec := input.review.object.spec
+        }
+
+        pod_spec = spec {
+          input.review.kind.kind == "Deployment"
+          spec := input.review.object.spec.template.spec
+        }
+
+        containers[container] {
+          container := pod_spec.containers[_]
+        }
+
+        containers[container] {
+          container := pod_spec.initContainers[_]
+        }
+
+        containers[container] {
+          container := pod_spec.ephemeralContainers[_]
+        }
+
+        image_allowed(image) {
+          allowed := input.parameters.allowedImages[_]
+          not endswith(allowed, "*")
+          image == allowed
+        }
+
+        image_allowed(image) {
+          allowed := input.parameters.allowedImages[_]
+          endswith(allowed, "*")
+          prefix := trim_suffix(allowed, "*")
+          startswith(image, prefix)
+        }
+
+        violation[{"msg": msg}] {
+          container := containers[_]
+          not image_allowed(container.image)
+          msg := sprintf(
+            "container <%v> uses unapproved image <%v>; allowed images: %v",
+            [container.name, container.image, input.parameters.allowedImages]
+          )
+        }

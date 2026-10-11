@@ -1,0 +1,35 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sAllowedReposv2
+metadata:
+  name: only-chainguard-images
+spec:
+  enforcementAction: scoped
+  scopedEnforcementActions:
+    - action: dryrun
+      enforcementPoints:
+        - name: validation.gatekeeper.sh
+        - name: audit.gatekeeper.sh
+  match:
+    scope: Namespaced
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment"]
+    excludedNamespaces:
+      - kube-system
+      - gatekeeper-system
+      - calico-system
+      - calico-apiserver
+      - tigera-operator
+  parameters:
+    allowedImages:
+      - "cgr.dev/chainguard/*"
+      # Exact-match exceptions for pipeline-installed workloads (no "*": the
+      # image string must match character for character). Each tag is pinned in
+      # lib/common.sh; bump both together, then: ./bootstrap.sh --stage gatekeeper
+      - "ghcr.io/goauthentik/server:2026.8.3"            # KB_AUTHENTIK_CHART_VERSION
+      - "docker.io/library/postgres:17.11-bookworm"      # Authentik chart's bundled Postgres
+      - "cloudflare/cloudflared:2026.10.0"               # KB_CLOUDFLARED_IMAGE_TAG
+      - "docker.io/rancher/local-path-provisioner:v0.0.37"  # KB_LOCAL_PATH_PROVISIONER_VERSION
+      - "docker.io/library/busybox"                      # local-path helper pods (untagged upstream)

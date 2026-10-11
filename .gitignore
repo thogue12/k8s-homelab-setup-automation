@@ -1,0 +1,14 @@
+# Secrets — NEVER commit. Holds Authentik keys + Cloudflare tunnel token.
+.env
+.env.*
+!.env.example
+
+# Resume ledger — per-machine runtime state.
+state/.bootstrap-state
+
+# cloudflared chart cloned at runtime by the cloudflared stage.
+homelab-helm-charts/
+
+# OS / editor noise
+.DS_Store
+*.swp
