@@ -1,1 +1,132 @@
-vscode-remote://ssh-remote%2Btim@192.168.1.226/home/tim/Documents/Ansible-K8s-Automation/Stages/files vscode-remote://ssh-remote%2Btim@192.168.1.226/home/tim/Documents/Ansible-K8s-Automation/Stages/files/allowed-images-template.yaml vscode-remote://ssh-remote%2Btim@192.168.1.226/home/tim/Documents/Ansible-K8s-Automation/Stages/files/only-chainguard-images.yaml vscode-remote://ssh-remote%2Btim@192.168.1.226/home/tim/Documents/Ansible-K8s-Automation/Stages/apps.yaml vscode-remote://ssh-remote%2Btim@192.168.1.226/home/tim/Documents/Ansible-K8s-Automation/Stages/calico.yaml vscode-remote://ssh-remote%2Btim@192.168.1.226/home/tim/Documents/Ansible-K8s-Automation/Stages/control-plane.yaml vscode-remote://ssh-remote%2Btim@192.168.1.226/home/tim/Documents/Ansible-K8s-Automation/Stages/gatekeeper.yaml vscode-remote://ssh-remote%2Btim@192.168.1.226/home/tim/Documents/Ansible-K8s-Automation/Stages/install-prereqs.yaml vscode-remote://ssh-remote%2Btim@192.168.1.226/home/tim/Documents/Ansible-K8s-Automation/Stages/storage.yaml
+---
+- name: Kubernetes control-plane init (Stage 2)
+  hosts: k8s_nodes
+  become: true
+  vars:
+    # pod_cidr, kube_user come from group_vars/k8s_nodes.
+    admin_conf: /etc/kubernetes/admin.conf
+
+  tasks:
+    #######################################################################
+    ### Resolve the target user's home directory
+    #######################################################################
+    - name: Look up the kube user's account info
+      ansible.builtin.getent:
+        database: passwd
+        key: "{{ kube_user }}"
+
+    - name: Set the kube user's home directory
+      ansible.builtin.set_fact:
+        kube_home: "{{ getent_passwd[kube_user][4] }}"
+
+    #######################################################################
+    ### Check whether the control plane is already initialized
+    #######################################################################
+    - name: Check for an existing admin.conf
+      ansible.builtin.stat:
+        path: "{{ admin_conf }}"
+      register: admin_conf_stat
+
+    #######################################################################
+    ### Initialize the control plane (only when not already initialized)
+    #######################################################################
+    - name: Initialize the control plane with kubeadm
+      ansible.builtin.command: "kubeadm init --pod-network-cidr={{ pod_cidr }}"
+      args:
+        creates: "{{ admin_conf }}"
+      when: not admin_conf_stat.stat.exists
+
+    #######################################################################
+    ### Fail fast if the node is in a partial state
+    #######################################################################
+    - name: Re-check for admin.conf after init
+      ansible.builtin.stat:
+        path: "{{ admin_conf }}"
+      register: admin_conf_after
+
+    - name: Assert the control plane produced admin.conf
+      ansible.builtin.assert:
+        that:
+          - admin_conf_after.stat.exists
+        fail_msg: >-
+          A control plane appears to be running but {{ admin_conf }} is missing;
+          the node is in a partial state. Reset it (sudo kubeadm reset -f) and re-run.
+
+    #######################################################################
+    ### Create the user's ~/.kube directory
+    #######################################################################
+    - name: Create the user's .kube directory
+      ansible.builtin.file:
+        path: "{{ kube_home }}/.kube"
+        state: directory
+        owner: "{{ kube_user }}"
+        group: "{{ kube_user }}"
+        mode: "0750"
+
+    #######################################################################
+    ### Back up any existing kubeconfig before overwriting
+    #######################################################################
+    - name: Check for an existing user kubeconfig
+      ansible.builtin.stat:
+        path: "{{ kube_home }}/.kube/config"
+      register: user_kubeconfig
+
+    - name: Back up the existing kubeconfig
+      ansible.builtin.copy:
+        src: "{{ kube_home }}/.kube/config"
+        dest: "{{ kube_home }}/.kube/config.bak.{{ ansible_date_time.iso8601_basic_short }}"
+        remote_src: true
+        owner: "{{ kube_user }}"
+        group: "{{ kube_user }}"
+        mode: "0600"
+      when: user_kubeconfig.stat.exists
+
+    #######################################################################
+    ### Install the admin kubeconfig at ~/.kube/config
+    ### (copy as root — admin.conf is root-only mode 0600 — then chown it)
+    #######################################################################
+    - name: Copy admin.conf to the user's kubeconfig
+      ansible.builtin.command: "cp {{ admin_conf }} {{ kube_home }}/.kube/config"
+      changed_when: true
+
+    - name: Set ownership and permissions on the user's kubeconfig
+      ansible.builtin.file:
+        path: "{{ kube_home }}/.kube/config"
+        owner: "{{ kube_user }}"
+        group: "{{ kube_user }}"
+        mode: "0600"
+
+    #######################################################################
+    ### Remove the control-plane taint so the node schedules workloads
+    #######################################################################
+    - name: Remove the control-plane NoSchedule taint from all nodes
+      ansible.builtin.command: >-
+        kubectl --kubeconfig {{ admin_conf }}
+        taint nodes --all node-role.kubernetes.io/control-plane-
+      register: taint_result
+      changed_when: "'untainted' in taint_result.stdout"
+      failed_when:
+        - taint_result.rc != 0
+        - "'not found' not in taint_result.stderr"
+
+    #######################################################################
+    ### Verify the cluster is reachable
+    #######################################################################
+    - name: Get cluster nodes
+      ansible.builtin.command: "kubectl --kubeconfig {{ admin_conf }} get nodes --no-headers"
+      register: get_nodes
+      changed_when: false
+      failed_when: get_nodes.rc != 0
+
+    #######################################################################
+    ### Assert the node is Ready / reachable
+    #######################################################################
+    - name: Assert at least one node is present
+      ansible.builtin.assert:
+        that:
+          - get_nodes.stdout_lines | length > 0
+        fail_msg: >-
+          'kubectl get nodes' returned no nodes; inspect with:
+          kubectl --kubeconfig {{ admin_conf }} get nodes;
+          kubectl -n kube-system get pods
+        success_msg: "control plane reachable ({{ get_nodes.stdout_lines | length }} node(s))"
