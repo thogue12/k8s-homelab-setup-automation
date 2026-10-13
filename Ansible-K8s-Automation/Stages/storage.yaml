@@ -1,0 +1,59 @@
+---
+- name: Default StorageClass provisioner (Stage 4)
+  hosts: k8s_nodes
+  become: true
+  vars:
+    local_path_manifest: "https://raw.githubusercontent.com/rancher/local-path-provisioner/{{ local_path_version }}/deploy/local-path-storage.yaml"
+    storageclass_name: local-path
+
+  tasks:
+    #######################################################################
+    ### Install the Rancher local-path provisioner
+    #######################################################################
+    - name: Apply the local-path provisioner manifest
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        apply: true
+        src: "{{ local_path_manifest }}"
+
+    #######################################################################
+    ### Mark the local-path StorageClass as the cluster default
+    #######################################################################
+    - name: Set local-path as the default StorageClass
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        kind: StorageClass
+        name: "{{ storageclass_name }}"
+        definition:
+          metadata:
+            annotations:
+              storageclass.kubernetes.io/is-default-class: "true"
+
+    #######################################################################
+    ### Verify exactly one StorageClass is the default
+    #######################################################################
+    - name: List all StorageClasses
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        kind: StorageClass
+      register: storage_classes
+
+    - name: Count the default StorageClasses
+      ansible.builtin.set_fact:
+        default_sc_count: >-
+          {%- set ns = namespace(c=0) -%}
+          {%- for sc in storage_classes.resources -%}
+            {%- if (sc.metadata.annotations | default({})).get('storageclass.kubernetes.io/is-default-class') == 'true' -%}
+              {%- set ns.c = ns.c + 1 -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {{ ns.c }}
+
+    - name: Assert exactly one default StorageClass
+      ansible.builtin.assert:
+        that:
+          - default_sc_count | int == 1
+        fail_msg: "expected exactly one default StorageClass, found {{ default_sc_count }}"
+        success_msg: "exactly one default StorageClass ({{ storageclass_name }})"

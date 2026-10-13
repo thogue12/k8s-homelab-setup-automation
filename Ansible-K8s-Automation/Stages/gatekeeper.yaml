@@ -1,0 +1,137 @@
+---
+- name: OPA Gatekeeper + Chainguard image allowlist (Stage 5)
+  hosts: k8s_nodes
+  become: true
+  vars:
+    gatekeeper_manifest: "https://raw.githubusercontent.com/open-policy-agent/gatekeeper/{{ gatekeeper_version }}/deploy/gatekeeper.yaml"
+    gatekeeper_ns: gatekeeper-system
+    template_file: "{{ assets_dir }}/allowed-images-template.yaml"
+    constraint_file: "{{ assets_dir }}/only-chainguard-images.yaml"
+    constraint_kind: K8sAllowedReposv2
+    constraint_name: only-chainguard-images
+    template_crd: k8sallowedreposv2.constraints.gatekeeper.sh
+
+  tasks:
+    #######################################################################
+    ### Stage the policy assets onto the node
+    #######################################################################
+    - name: Ensure the assets directory exists
+      ansible.builtin.file:
+        path: "{{ assets_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy the Gatekeeper policy assets to the node
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ assets_dir }}/{{ item }}"
+        mode: "0644"
+      loop:
+        - allowed-images-template.yaml
+        - only-chainguard-images.yaml
+
+    #######################################################################
+    ### Install OPA Gatekeeper
+    #######################################################################
+    - name: Apply the Gatekeeper release manifest
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        apply: true
+        src: "{{ gatekeeper_manifest }}"
+
+    #######################################################################
+    ### Wait for the controller-manager and audit deployments
+    #######################################################################
+    - name: Wait for Gatekeeper deployments to be Available
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: apps/v1
+        kind: Deployment
+        name: "{{ item }}"
+        namespace: "{{ gatekeeper_ns }}"
+      register: gk_deploy
+      until: >-
+        gk_deploy.resources | length > 0 and
+        (gk_deploy.resources[0].status.availableReplicas | default(0)) >= 1
+      retries: 30
+      delay: 10
+      loop:
+        - gatekeeper-controller-manager
+        - gatekeeper-audit
+
+    #######################################################################
+    ### Apply the custom ConstraintTemplate
+    #######################################################################
+    - name: Apply the k8sallowedreposv2 ConstraintTemplate
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        apply: true
+        src: "{{ template_file }}"
+
+    #######################################################################
+    ### Wait for the generated CRD to be Established
+    #######################################################################
+    - name: Wait for the constraint CRD to be Established
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: apiextensions.k8s.io/v1
+        kind: CustomResourceDefinition
+        name: "{{ template_crd }}"
+      register: crd_info
+      until: >-
+        crd_info.resources | length > 0 and
+        (crd_info.resources[0].status.conditions
+          | selectattr('type', 'equalto', 'Established')
+          | selectattr('status', 'equalto', 'True') | list | length) > 0
+      retries: 24
+      delay: 5
+
+    #######################################################################
+    ### Apply the Chainguard allowlist constraint (authored at dryrun)
+    #######################################################################
+    - name: Apply the Chainguard allowlist constraint
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        apply: true
+        src: "{{ constraint_file }}"
+
+    #######################################################################
+    ### Flip scoped enforcement from dryrun to deny
+    #######################################################################
+    - name: Switch scoped enforcement action to deny
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: patched
+        api_version: constraints.gatekeeper.sh/v1beta1
+        kind: "{{ constraint_kind }}"
+        name: "{{ constraint_name }}"
+        definition:
+          spec:
+            scopedEnforcementActions:
+              - action: deny
+                enforcementPoints:
+                  - name: validation.gatekeeper.sh
+                  - name: audit.gatekeeper.sh
+
+    #######################################################################
+    ### Verify the constraint action is deny
+    #######################################################################
+    - name: Read back the constraint
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: constraints.gatekeeper.sh/v1beta1
+        kind: "{{ constraint_kind }}"
+        name: "{{ constraint_name }}"
+      register: constraint_info
+
+    - name: Assert the scoped enforcement action is deny
+      ansible.builtin.assert:
+        that:
+          - >-
+            (constraint_info.resources[0].spec.scopedEnforcementActions
+              | rejectattr('action', 'equalto', 'deny') | list | length) == 0
+        fail_msg: "constraint {{ constraint_name }} is not fully in deny mode"
+        success_msg: "constraint {{ constraint_name }} enforcement action is deny"

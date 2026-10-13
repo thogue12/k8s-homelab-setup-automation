@@ -1,0 +1,57 @@
+---
+
+###########################################################################
+### Cluster-wide
+###########################################################################
+# Kubernetes minor version used for the apt repo and tool install.
+k8s_minor: "1.37"
+
+# Pod network CIDR. Must be identical across control-plane and calico stages.
+pod_cidr: "10.244.0.0/16"
+
+# The user who owns ~/.kube/config and runs kubectl.
+kube_user: "tim"
+
+# Kubeconfig the k8s/helm modules read. Point at the user copy that the
+# control-plane stage installs (owned by kube_user, readable), NOT the
+# root-only /etc/kubernetes/admin.conf which the modules can't read.
+kubeconfig: "/home/{{ kube_user }}/.kube/config"
+
+###########################################################################
+### Pinned component versions
+###########################################################################
+calico_version: "v3.33.0"
+local_path_version: "v0.0.30"
+gatekeeper_version: "v3.19.0"
+helm_version: "v3.16.3"
+authentik_chart_version: "2026.8.3"
+
+###########################################################################
+### Gatekeeper policy assets (path on the target node)
+###########################################################################
+assets_dir: /opt/k8s-bootstrap/assets
+
+###########################################################################
+### Apps stage (Authentik + Cloudflare tunnel)
+###########################################################################
+apps_ns: authentik
+
+authentik_repo_name: authentik
+authentik_repo_url: "https://charts.goauthentik.io"
+authentik_chart: "authentik/authentik"
+
+# damienjburks cloudflared chart (cloned to the node, then installed by path).
+cloudflared_repo_url: "https://github.com/damienjburks/homelab-helm-charts.git"
+cloudflared_repo_version: main
+cloudflared_repo_dir: /opt/homelab-helm-charts
+cloudflared_chart: /opt/homelab-helm-charts/cloudflared
+
+tunnel_secret_name: cloudflare-tunnel-token
+
+###########################################################################
+### Secret bridge — maps vault_* values to the names plays reference.
+### (Keeps the encrypted vault.yml as the only place real secrets live.)
+###########################################################################
+authentik_secret_key: "{{ vault_authentik_secret_key }}"
+authentik_postgres_password: "{{ vault_authentik_postgres_password }}"
+cloudflare_tunnel_token: "{{ vault_cloudflare_tunnel_token }}"

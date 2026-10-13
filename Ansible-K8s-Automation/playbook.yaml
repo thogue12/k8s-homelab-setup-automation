@@ -1,0 +1,34 @@
+---
+# Top-level orchestrator — runs the six stages in order against k8s_nodes.
+#
+#   ansible-playbook playbook.yml --ask-vault-pass --ask-become-pass
+#
+# Run a single stage with its tag:
+#   ansible-playbook playbook.yml --tags calico --ask-vault-pass
+#
+# Preview without changing anything:
+#   ansible-playbook playbook.yml --check --ask-vault-pass
+
+- name: Stage 1 — node prerequisites
+  import_playbook: Stages/install-prereqs.yaml
+  tags: [prereqs]
+
+- name: Stage 2 — control-plane init
+  import_playbook: Stages/control-plane.yaml
+  tags: [control-plane]
+
+- name: Stage 3 — Calico CNI
+  import_playbook: Stages/calico.yaml
+  tags: [calico]
+
+- name: Stage 4 — default StorageClass
+  import_playbook: Stages/storage.yaml
+  tags: [storage]
+
+- name: Stage 5 — Gatekeeper + Chainguard policy
+  import_playbook: Stages/gatekeeper.yaml
+  tags: [gatekeeper]
+
+- name: Stage 6 — Helm, Authentik, Cloudflare tunnel
+  import_playbook: Stages/apps.yaml
+  tags: [apps]

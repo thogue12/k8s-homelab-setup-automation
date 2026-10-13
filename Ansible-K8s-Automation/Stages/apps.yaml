@@ -1,0 +1,164 @@
+---
+- name: Helm, Authentik, and the Cloudflare tunnel (Stage 6)
+  hosts: k8s_nodes
+  become: true
+  # All vars (apps_ns, chart refs, cloudflared_*, tunnel_secret_name, and the
+  # secrets bridged from vault.yml) come from group_vars/k8s_nodes.
+
+  tasks:
+    #######################################################################
+    ### Fail early if required secrets were not provided
+    #######################################################################
+    - name: Assert required secrets are set
+      ansible.builtin.assert:
+        that:
+          - authentik_secret_key | default('') | length > 0
+          - authentik_postgres_password | default('') | length > 0
+          - cloudflare_tunnel_token | default('') | length > 0
+        fail_msg: >-
+          Set authentik_secret_key, authentik_postgres_password, and
+          cloudflare_tunnel_token (e.g. via --extra-vars or an ansible-vault file).
+
+    #######################################################################
+    ### Ensure the Helm CLI is installed (the kubernetes.core.helm* modules
+    ### are wrappers around the helm binary and fail if it is absent).
+    #######################################################################
+    - name: Check whether helm is already installed
+      ansible.builtin.command: helm version
+      register: helm_check
+      changed_when: false
+      failed_when: false
+
+
+    - name: Install Helm from the official release tarball
+      when: helm_check.rc != 0
+      block:
+        - name: Create a temporary download directory
+          ansible.builtin.tempfile:
+            state: directory
+            suffix: helm
+          register: helm_tmp
+
+        - name: Download the Helm release tarball
+          ansible.builtin.get_url:
+            url: "https://get.helm.sh/helm-{{ helm_version }}-linux-amd64.tar.gz"
+            dest: "{{ helm_tmp.path }}/helm.tar.gz"
+            checksum: "sha256:https://get.helm.sh/helm-{{ helm_version }}-linux-amd64.tar.gz.sha256sum"
+            mode: "0644"
+
+        - name: Extract the Helm tarball
+          ansible.builtin.unarchive:
+            src: "{{ helm_tmp.path }}/helm.tar.gz"
+            dest: "{{ helm_tmp.path }}"
+            remote_src: true
+
+        - name: Install the helm binary to /usr/local/bin
+          ansible.builtin.copy:
+            src: "{{ helm_tmp.path }}/linux-amd64/helm"
+            dest: /usr/local/bin/helm
+            mode: "0755"
+            remote_src: true
+
+      always:
+        - name: Clean up the temporary download directory
+          ansible.builtin.file:
+            path: "{{ helm_tmp.path }}"
+            state: absent
+          when: helm_tmp.path is defined
+
+    #######################################################################
+    ### Add + update the goauthentik Helm repo
+    #######################################################################
+    - name: Add the goauthentik Helm repository
+      kubernetes.core.helm_repository:
+        name: "{{ authentik_repo_name }}"
+        repo_url: "{{ authentik_repo_url }}"
+
+    #######################################################################
+    ### Install / upgrade Authentik (idempotent via helm module)
+    #######################################################################
+    - name: Install or upgrade Authentik
+      kubernetes.core.helm:
+        kubeconfig: "{{ kubeconfig }}"
+        name: "{{ authentik_repo_name }}"
+        chart_ref: "{{ authentik_chart }}"
+        chart_version: "{{ authentik_chart_version }}"
+        release_namespace: "{{ apps_ns }}"
+        create_namespace: true
+        wait: true
+        timeout: 15m0s
+        values:
+          authentik:
+            secret_key: "{{ authentik_secret_key }}"
+            postgresql:
+              password: "{{ authentik_postgres_password }}"
+          postgresql:
+            enabled: true
+            auth:
+              password: "{{ authentik_postgres_password }}"
+
+    #######################################################################
+    ### Create / update the Cloudflare tunnel-token Secret
+    #######################################################################
+    - name: Create the Cloudflare tunnel-token Secret
+      no_log: true
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Secret
+          metadata:
+            name: "{{ tunnel_secret_name }}"
+            namespace: "{{ apps_ns }}"
+          type: Opaque
+          stringData:
+            token: "{{ cloudflare_tunnel_token }}"
+
+    #######################################################################
+    ### Clone the damienjburks cloudflared chart repo if absent
+    #######################################################################
+    - name: Clone the cloudflared chart repository
+      ansible.builtin.git:
+        repo: "{{ cloudflared_repo_url }}"
+        dest: "{{ cloudflared_repo_dir }}"
+        version: main
+        update: false
+
+    #######################################################################
+    ### Install / upgrade cloudflared from the local chart path
+    #######################################################################
+    - name: Install or upgrade cloudflared
+      kubernetes.core.helm:
+        kubeconfig: "{{ kubeconfig }}"
+        name: cloudflared
+        chart_ref: "{{ cloudflared_chart }}"
+        release_namespace: "{{ apps_ns }}"
+        wait: true
+        values:
+          image:
+            repository: "{{ cloudflared_image_repository }}"
+            tag: "{{ cloudflared_image_tag }}"
+
+    #######################################################################
+    ### Verify both releases are deployed
+    #######################################################################
+    - name: Gather Helm release status
+      kubernetes.core.helm_info:
+        kubeconfig: "{{ kubeconfig }}"
+        name: "{{ item }}"
+        release_namespace: "{{ apps_ns }}"
+      register: release_status
+      loop:
+        - "{{ authentik_repo_name }}"
+        - cloudflared
+
+    - name: Assert both releases are deployed
+      ansible.builtin.assert:
+        that:
+          - item.status.status == 'deployed'
+        fail_msg: "release '{{ item.item }}' is not deployed (status: {{ item.status.status | default('<none>') }})"
+        success_msg: "release '{{ item.item }}' is deployed"
+      loop: "{{ release_status.results }}"
+      loop_control:
+        label: "{{ item.item }}"

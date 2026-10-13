@@ -1,0 +1,102 @@
+---
+- name: Install the Calico CNI (Stage 3)
+  hosts: k8s_nodes
+  become: true
+  vars:
+    calico_base: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests"
+
+  tasks:
+    #######################################################################
+    ### Install the Calico CRDs (server-side apply, force conflicts)
+    #######################################################################
+    - name: Apply the Calico CRDs
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        apply: true
+        server_side_apply:
+          field_manager: ansible
+          force_conflicts: true
+        src: "{{ calico_base }}/v3_projectcalico_org.yaml"
+
+    #######################################################################
+    ### Install the Tigera operator (server-side apply, force conflicts)
+    #######################################################################
+    - name: Apply the Tigera operator
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        apply: true
+        server_side_apply:
+          field_manager: ansible
+          force_conflicts: true
+        src: "{{ calico_base }}/tigera-operator.yaml"
+
+    #######################################################################
+    ### Fetch custom-resources.yaml and inject the pod CIDR
+    #######################################################################
+    - name: Download the Calico custom-resources manifest
+      ansible.builtin.get_url:
+        url: "{{ calico_base }}/custom-resources.yaml"
+        dest: /tmp/calico-custom-resources.yaml
+        mode: "0644"
+
+    - name: Set the Calico IP pool CIDR
+      ansible.builtin.replace:
+        path: /tmp/calico-custom-resources.yaml
+        regexp: '^(\s*cidr:\s*).*$'
+        # Use \g<1> rather than \1: pod_cidr starts with a digit (10.244...),
+        # so \1 would be read as backreference \110 and mangle the line.
+        replace: '\g<1>{{ pod_cidr }}'
+
+    #######################################################################
+    ### Apply the Calico Installation / custom resources
+    #######################################################################
+    - name: Apply the Calico custom resources
+      kubernetes.core.k8s:
+        kubeconfig: "{{ kubeconfig }}"
+        state: present
+        apply: true
+        src: /tmp/calico-custom-resources.yaml
+
+    #######################################################################
+    ### Wait for the operator to reconcile (all tigerastatus Available)
+    #######################################################################
+    - name: Wait for the 'calico' tigerastatus to report Available
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: operator.tigera.io/v1
+        kind: TigeraStatus
+        name: calico
+      register: calico_status
+      until: >-
+        calico_status.resources | length > 0 and
+        (calico_status.resources[0].status.conditions
+          | selectattr('type', 'equalto', 'Available')
+          | selectattr('status', 'equalto', 'True') | list | length) > 0
+      retries: 60
+      delay: 10
+
+    #######################################################################
+    ### Wait for calico-kube-controllers to become Available
+    #######################################################################
+    - name: Wait for calico-kube-controllers to be Available
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{ kubeconfig }}"
+        api_version: apps/v1
+        kind: Deployment
+        name: calico-kube-controllers
+        namespace: calico-system
+      register: calico_ctrl
+      until: >-
+        calico_ctrl.resources | length > 0 and
+        (calico_ctrl.resources[0].status.availableReplicas | default(0)) >= 1
+      retries: 30
+      delay: 10
+
+    #######################################################################
+    ### Done
+    #######################################################################
+    - name: Report completion
+      ansible.builtin.debug:
+        msg: "Calico {{ calico_version }} installed and reconciled."

@@ -1,0 +1,194 @@
+---
+- name: Kubernetes node prerequisites (Stage 1)
+  hosts: k8s_nodes
+  become: true
+
+  tasks:
+    #######################################################################
+    ### Load overlay + br_netfilter modules now
+    #######################################################################
+    - name: Load required kernel modules
+      community.general.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - overlay
+        - br_netfilter
+
+    #######################################################################
+    ### Persist modules across reboots
+    #######################################################################
+    - name: Persist kernel modules in /etc/modules-load.d/k8s.conf
+      ansible.builtin.copy:
+        dest: /etc/modules-load.d/k8s.conf
+        content: |
+          overlay
+          br_netfilter
+        mode: "0644"
+
+    #######################################################################
+    ### Set the three k8s sysctl params (=1) + apply
+    #######################################################################
+    - name: Set Kubernetes sysctl params
+      ansible.posix.sysctl:
+        name: "{{ item }}"
+        value: "1"
+        sysctl_file: /etc/sysctl.d/k8s.conf
+        sysctl_set: true
+        reload: true
+        state: present
+      loop:
+        - net.bridge.bridge-nf-call-iptables
+        - net.bridge.bridge-nf-call-ip6tables
+        - net.ipv4.ip_forward
+
+    #######################################################################
+    ### Disable swap now (swapoff -a)
+    #######################################################################
+    - name: Disable swap immediately
+      ansible.builtin.command: swapoff -a
+      when: ansible_swaptotal_mb > 0
+      changed_when: ansible_swaptotal_mb > 0
+
+    #######################################################################
+    ### Remove the swap entry from /etc/fstab
+    #######################################################################
+    - name: Remove swap entries from fstab
+      ansible.posix.mount:
+        path: none
+        fstype: swap
+        state: absent_from_fstab
+
+    #######################################################################
+    ### Install base packages (incl. containerd)
+    #######################################################################
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gpg
+          - git
+          - containerd
+        state: present
+        update_cache: true
+
+    #######################################################################
+    ### Ensure containerd config directory exists
+    #######################################################################
+    - name: Ensure /etc/containerd exists
+      ansible.builtin.file:
+        path: /etc/containerd
+        state: directory
+        mode: '0755'
+
+    #######################################################################
+    ### Generate default containerd config
+    #######################################################################
+    - name: Generate default containerd config
+      ansible.builtin.shell: containerd config default > /etc/containerd/config.toml
+      args:
+        creates: /etc/containerd/config.toml
+
+    #######################################################################
+    ### Set SystemdCgroup = true
+    #######################################################################
+    - name: Set containerd to use the systemd cgroup driver
+      ansible.builtin.replace:
+        path: /etc/containerd/config.toml
+        regexp: 'SystemdCgroup = false'
+        replace: 'SystemdCgroup = true'
+      notify: Restart containerd
+
+    #######################################################################
+    ### Download the Kubernetes apt GPG key
+    #######################################################################
+    - name: Ensure /etc/apt/keyrings exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+
+    - name: Download the Kubernetes apt GPG key
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/v{{ k8s_minor }}/deb/Release.key"
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+        mode: "0644"
+
+    #######################################################################
+    ### Add the Kubernetes apt repo
+    #######################################################################
+    - name: Add the Kubernetes apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/v{{ k8s_minor }}/deb/ /"
+        filename: kubernetes
+        state: present
+
+    #######################################################################
+    ### Install kubelet, kubeadm, kubectl
+    #######################################################################
+    - name: Install Kubernetes tools
+      ansible.builtin.apt:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        update_cache: true
+
+    #######################################################################
+    ### apt-mark hold the three packages (pin versions)
+    #######################################################################
+    - name: Hold Kubernetes packages at their installed version
+      ansible.builtin.dpkg_selections:
+        name: "{{ item }}"
+        selection: hold
+      loop:
+        - kubelet
+        - kubeadm
+        - kubectl
+
+    #######################################################################
+    ### Enable + start the kubelet service
+    #######################################################################
+    - name: Enable and start kubelet
+      ansible.builtin.systemd:
+        name: kubelet
+        enabled: true
+        state: started
+
+    #######################################################################
+    ### Verify containerd active + SystemdCgroup set
+    #######################################################################
+    - name: Flush handlers so containerd restarts before verification
+      ansible.builtin.meta: flush_handlers
+
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Assert containerd is running
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['containerd.service'].state == 'running'
+        fail_msg: "containerd is not active — check: systemctl status containerd"
+        success_msg: "containerd is active"
+
+    - name: Confirm SystemdCgroup is enabled
+      ansible.builtin.command: grep -q 'SystemdCgroup = true' /etc/containerd/config.toml
+      changed_when: false
+      failed_when: false
+      register: cgroup_check
+
+    - name: Assert SystemdCgroup = true
+      ansible.builtin.assert:
+        that:
+          - cgroup_check.rc == 0
+        fail_msg: "containerd is not using the systemd cgroup driver"
+
+  handlers:
+    - name: Restart containerd
+      ansible.builtin.systemd:
+        name: containerd
+        state: restarted
+        enabled: true

@@ -1,0 +1,10 @@
+---
+# Authentik signing/encryption key (openssl rand -hex 32).
+vault_authentik_secret_key: ""
+
+# PostgreSQL password (openssl rand -hex 32). Used for both
+# authentik.postgresql.password and postgresql.auth.password.
+vault_authentik_postgres_password: ""
+
+# Cloudflare tunnel token from the Cloudflare dashboard (starts with eyJ).
+vault_cloudflare_tunnel_token: "CHANGE_ME"
