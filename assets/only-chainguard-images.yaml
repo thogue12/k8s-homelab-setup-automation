@@ -25,11 +25,8 @@ spec:
   parameters:
     allowedImages:
       - "cgr.dev/chainguard/*"
-      # Exact-match exceptions for pipeline-installed workloads (no "*": the
-      # image string must match character for character). Each tag is pinned in
-      # lib/common.sh; bump both together, then: ./bootstrap.sh --stage gatekeeper
-      - "ghcr.io/goauthentik/server:2026.8.3"            # KB_AUTHENTIK_CHART_VERSION
-      - "docker.io/library/postgres:17.11-bookworm"      # Authentik chart's bundled Postgres
-      - "cloudflare/cloudflared:2026.10.0"               # KB_CLOUDFLARED_IMAGE_TAG
-      - "docker.io/rancher/local-path-provisioner:v0.0.37"  # KB_LOCAL_PATH_PROVISIONER_VERSION
-      - "docker.io/library/busybox"                      # local-path helper pods (untagged upstream)
+      - "ghcr.io/goauthentik/server:2026.8.3"            
+      - "docker.io/library/postgres:17.11-bookworm"      
+      - "cloudflare/cloudflared:2026.10.0"               
+      - "docker.io/rancher/local-path-provisioner:v0.0.37
+      - "docker.io/library/busybox"                      

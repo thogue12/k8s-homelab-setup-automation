@@ -11,10 +11,6 @@ pod_cidr: "10.244.0.0/16"
 
 # The user who owns ~/.kube/config and runs kubectl.
 kube_user: "tim"
-
-# Kubeconfig the k8s/helm modules read. Point at the user copy that the
-# control-plane stage installs (owned by kube_user, readable), NOT the
-# root-only /etc/kubernetes/admin.conf which the modules can't read.
 kubeconfig: "/home/{{ kube_user }}/.kube/config"
 
 ###########################################################################
@@ -41,12 +37,16 @@ authentik_repo_url: "https://charts.goauthentik.io"
 authentik_chart: "authentik/authentik"
 
 # damienjburks cloudflared chart (cloned to the node, then installed by path).
-cloudflared_repo_url: "https://github.com/damienjburks/homelab-helm-charts.git"
+cloudflared_repo_url: "https://github.com/thogue12/homelab-helm-charts.git"
 cloudflared_repo_version: main
 cloudflared_repo_dir: /opt/homelab-helm-charts
 cloudflared_chart: /opt/homelab-helm-charts/cloudflared
+cloudflared_image_repository: cloudflare/cloudflared
+cloudflared_image_tag: "2026.10.0"
 
 tunnel_secret_name: cloudflare-tunnel-token
+
+
 
 ###########################################################################
 ### Secret bridge — maps vault_* values to the names plays reference.

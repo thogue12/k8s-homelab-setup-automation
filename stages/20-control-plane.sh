@@ -1,7 +1,4 @@
 #!/usr/bin/env bash
-#
-# Stage 2 (control-plane): kubeadm init + user kubeconfig + taint removal.
-# Migrated from bootStrap-K8s.bash §4 and make-kube-work-for-current-user.sh.
 
 set -Eeuo pipefail
 
@@ -25,9 +22,6 @@ KUBE_HOME="$(getent passwd "${KUBE_USER}" | cut -d: -f6)"
 readonly ADMIN_CONF="/etc/kubernetes/admin.conf"
 
 # Load .env so POD_CIDR (and any other persisted inputs) are in scope. Without
-# this, resolve_pod_cidr sees POD_CIDR unset when the stage runs on its own and
-# falls back to discovery/default — which caused kubeadm init to use the wrong
-# pod CIDR instead of the one in .env.
 env_load
 
 # Run as root directly if already root, else via sudo.
@@ -40,25 +34,14 @@ sudo_if_needed() {
 }
 
 # Pod CIDR: resolve, defaulting to 10.244.0.0/16 at init time. NOT Calico's
-# 192.168.0.0/16 default: that overlaps a typical 192.168.x home LAN, which
-# makes pod->router/DNS traffic get routed into the overlay instead of NATed
-# out, breaking all external DNS from pods. 10.244/16 avoids that collision.
 POD_CIDR_RESOLVED="$(resolve_pod_cidr)"
 if [ -z "${POD_CIDR_RESOLVED}" ]; then
   POD_CIDR_RESOLVED="10.244.0.0/16"
 fi
 
 # Already initialized when admin.conf exists, the API is healthy, or a control
-# plane is demonstrably running on this node.
-# NOTE: /etc/kubernetes is mode 700 root:root, so a bare '[ -f ... ]' is FALSE
-# for a non-root caller even when admin.conf exists. Checking only that led to
-# 'kubeadm init' being attempted against a LIVE cluster (ports 6443/10257/10259
-# already in use). The extra probes below make that impossible.
 control_plane_initialized() {
-  # Cheapest, non-interactive probes first so we never prompt for a password
-  # just to answer "is this already initialized?".
   [ -f "${ADMIN_CONF}" ] && return 0
-  # A listening API server means a control plane is already up (no root needed).
   if command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ':6443'; then
     return 0
   fi
