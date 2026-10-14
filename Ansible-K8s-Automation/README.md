@@ -10,7 +10,7 @@ idempotency logic needed.
 
 ## Stages
 
-`playbook.yml` runs these six in order:
+`playbook.yaml` runs these six in order:
 
 | Stage | File | What it does |
 | --- | --- | --- |
